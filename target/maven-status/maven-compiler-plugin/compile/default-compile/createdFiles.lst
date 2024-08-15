@@ -1,0 +1,11 @@
+com/company/inventory/config/SecurityConfig.class
+com/company/inventory/models/Product$ProductBuilder.class
+com/company/inventory/models/Product.class
+com/company/inventory/controllers/HomeController.class
+com/company/inventory/controllers/IndexController.class
+com/company/inventory/controllers/InventoryController.class
+com/company/inventory/config/CorsConfig$1.class
+com/company/inventory/repositories/ProductRepository.class
+com/company/inventory/services/InventoryService.class
+com/company/inventory/InventoryApplication.class
+com/company/inventory/config/CorsConfig.class

@@ -1,0 +1,134 @@
+name: Build, Scan, and Push
+
+on:
+  push:
+    branches: [ main, 'release/*' ]
+  workflow_dispatch:
+
+env:
+  DEPLOY_ENV: ${{ github.ref == 'refs/heads/main' && 'dev' || 'staging' }}
+
+jobs:
+  build:
+    runs-on: self-hosted
+    timeout-minutes: 60
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Cache Maven packages
+        uses: actions/cache@v3
+        with:
+          path: ~/.m2/repository
+          key: ${{ runner.os }}-maven-${{ hashFiles('**/pom.xml') }}
+          restore-keys: |
+            ${{ runner.os }}-maven-
+
+      - name: Set up JDK
+        uses: actions/setup-java@v3
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
+      - name: Build with Maven
+        run: mvn clean package -DskipTests
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v3
+        with:
+          name: app-jar
+          path: target/*.jar
+
+  download-artifacts:
+    needs: build
+    runs-on: self-hosted
+    steps:
+      - name: Download artifact
+        uses: actions/download-artifact@v3
+        with:
+          name: app-jar
+          path: ./downloaded-artifacts
+
+  security-scan:
+    needs: build
+    runs-on: self-hosted
+    timeout-minutes: 60
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+#      - name: Install Snyk CLI
+#        run: npm install -g snyk
+#
+#      - name: Run Snyk to check for vulnerabilities
+#        run: snyk test --all-projects
+#        env:
+#          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+
+      - name: Run OWASP Dependency-Check
+        run: mvn dependency-check:check
+
+      - name: Verify OWASP Dependency-Check Results
+        run: |
+          if [ ! -f target/dependency-check-report.html ]; then
+            echo "OWASP Dependency-Check report not found!"
+            exit 1
+          else
+            echo "OWASP Dependency-Check report generated successfully."
+          fi
+
+      - name: Upload OWASP Results
+        uses: actions/upload-artifact@v3
+        with:
+          name: dependency-check-report
+          path: target/dependency-check-report.html
+
+  code-quality:
+    needs: build
+    runs-on: self-hosted
+    timeout-minutes: 60
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: SonarQube Scan
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+        run: |
+          mvn sonar:sonar \
+            -Dsonar.projectKey=inventory-app \
+            -Dsonar.host.url=http://localhost:9000 \
+            -Dsonar.login=${{ secrets.SONAR_TOKEN }}
+
+  docker-build:
+    needs: [build, security-scan, code-quality]
+    runs-on: self-hosted
+    timeout-minutes: 60
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Download artifact
+        uses: actions/download-artifact@v3
+        with:
+          name: app-jar
+          path: target/
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@v2
+        with:
+          registry: ghcr.io
+          username: ${{ github.repository_owner }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v4
+        with:
+          context: .
+          push: true
+          tags: |
+            omisam/inventory-app:${{ github.sha }}
+            omisam/inventory-app:${{ github.ref_name }}

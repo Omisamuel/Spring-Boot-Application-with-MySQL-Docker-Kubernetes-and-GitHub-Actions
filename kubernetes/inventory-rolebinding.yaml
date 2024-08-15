@@ -1,0 +1,13 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: inventory-rolebinding
+  namespace: inventory-deployment
+subjects:
+  - kind: ServiceAccount
+    name: jenkins
+    namespace: inventory-deployment
+roleRef:
+  kind: Role
+  name: inventory-role
+  apiGroup: rbac.authorization.k8s.io

@@ -1,0 +1,132 @@
+name: Deploy to Local Kubernetes
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+      - 'release/*'
+
+env:
+  DEPLOY_ENV: ${{ github.ref == 'refs/heads/main' && 'dev' || 'staging' }}
+  NAMESPACE: inventory-deployment
+
+jobs:
+  deploy:
+    runs-on: [self-hosted, macos]
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Set up Minikube
+        uses: medyagh/setup-minikube@master
+        with:
+          minikube-version: 'latest'
+          kubernetes-version: 'stable'
+          driver: docker
+          cpus: 2
+          memory: 6000mb
+
+      - name: Verify kubectl setup
+        run: kubectl get nodes
+
+      - name: Create namespace
+        run: kubectl create namespace ${{ env.NAMESPACE }} --dry-run=client -o yaml | kubectl apply -f -
+
+      - name: Validate Kubernetes manifests
+        run: |
+          for file in kubernetes/*.yaml; do
+            echo "Validating $file"
+            kubectl apply --dry-run=client -f "$file"
+          done
+
+      - name: Deploy to Kubernetes
+        run: kubectl apply -f kubernetes/ -n ${{ env.NAMESPACE }}
+
+      - name: List deployments
+        run: kubectl get deployments -n ${{ env.NAMESPACE }}
+
+      - name: Wait for deployments to be available
+        run: |
+          kubectl get deployments -n ${{ env.NAMESPACE }} -o name | \
+          xargs -I {} kubectl rollout status -n ${{ env.NAMESPACE }} {} --timeout=600s
+
+      - name: Check Pod Status
+        run: kubectl get pods -n ${{ env.NAMESPACE }}
+
+      - name: Get Pod Logs for Debugging
+        run: |
+          kubectl get pods -n ${{ env.NAMESPACE }} -o name | \
+          xargs -I {} kubectl logs -n ${{ env.NAMESPACE }} {} --tail=100
+
+      - name: Get Pod Descriptions for Debugging
+        run: |
+          kubectl get pods -n ${{ env.NAMESPACE }} -o name | \
+          xargs -I {} kubectl describe pod {} -n ${{ env.NAMESPACE }}
+
+      - name: Get Services
+        run: kubectl get services -n ${{ env.NAMESPACE }}
+
+      - name: Run Smoke Tests
+        run: |
+          MINIKUBE_IP=$(minikube ip)
+          SERVICE_NAME=$(kubectl get services -n ${{ env.NAMESPACE }} -o jsonpath='{.items[0].metadata.name}')
+          SERVICE_PORT=$(kubectl get svc $SERVICE_NAME -n ${{ env.NAMESPACE }} -o jsonpath='{.spec.ports[0].nodePort}')
+          
+          echo "Minikube IP: $MINIKUBE_IP"
+          echo "Service Name: $SERVICE_NAME"
+          echo "Service Port: $SERVICE_PORT"
+          
+          # Function to check endpoint
+          check_endpoint() {
+            local url=$1
+            local expected_status=$2
+            local description=$3
+          
+            echo "Checking $description at $url"
+            status=$(curl -s -o /dev/null -w "%{http_code}" $url)
+            if [ $status -ne $expected_status ]; then
+              echo "$description failed. Expected status $expected_status, got $status"
+              return 1
+            fi
+            echo "$description passed"
+            return 0
+          }
+          
+          # Wait for the service to be ready
+          timeout 600s bash -c 'until curl -s "http://$MINIKUBE_IP:$SERVICE_PORT/health"; do echo "Waiting for service to be ready..."; sleep 5; done'
+          
+          # Perform checks
+          check_endpoint "http://$MINIKUBE_IP:$SERVICE_PORT/health" 200 "Health check" || exit 1
+          check_endpoint "http://$MINIKUBE_IP:$SERVICE_PORT/api/v1/inventory" 200 "Main endpoint check" || exit 1
+          
+          # Check specific item (adjust as needed)
+          ITEM_CHECK=$(curl -s "http://$MINIKUBE_IP:$SERVICE_PORT/api/v1/inventory/item/1" | jq -r '.name')
+          if [ "$ITEM_CHECK" != "Expected Item Name" ]; then
+            echo "Item check failed. Expected 'Expected Item Name', got '$ITEM_CHECK'"
+            exit 1
+          fi
+          
+          echo "All smoke tests passed successfully!"
+
+      - name: Describe Pods for Debugging
+        if: failure()
+        run: kubectl describe pods -n ${{ env.NAMESPACE }}
+
+      - name: Get Events for Debugging
+        if: failure()
+        run: kubectl get events -n ${{ env.NAMESPACE }}
+
+  notify:
+    needs: deploy
+    runs-on: ubuntu-latest
+    environment: dev
+    if: always()
+    steps:
+      - name: Notify Slack
+        uses: 8398a7/action-slack@v3
+        with:
+          status: ${{ job.status }}
+          fields: repo,message,commit,author,action,eventName,ref,workflow
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
